@@ -1,0 +1,79 @@
+AllCops:
+  Exclude:
+    - 'Gemfile'
+    - 'db/schema_migration.rb'
+    - 'vendor/**/*'
+  TargetRubyVersion: 2.4
+
+Lint/HandleExceptions:
+  Enabled: false
+
+Metrics/LineLength:
+  Max: 100
+
+Metrics/MethodLength:
+  Max: 80
+
+Metrics/BlockLength:
+  Max: 50
+  Exclude:
+    - 'spec/**/*'
+    - 'db/migrations/**/*'
+    - 'tasks/**/*'
+
+Metrics/ClassLength:
+  Max: 1000
+
+Metrics/AbcSize:
+  Max: 100
+
+Metrics/CyclomaticComplexity:
+  Max: 30
+
+Metrics/PerceivedComplexity:
+  Max: 30
+
+Metrics/ParameterLists:
+  Max: 10
+
+Style/ClassAndModuleChildren:
+  Enabled: false
+
+Style/Documentation:
+  Enabled: false
+
+Style/DoubleNegation:
+  Enabled: false
+
+Style/FrozenStringLiteralComment:
+  Enabled: false
+
+Style/NegatedIf:
+  Enabled: false
+
+Style/NegatedWhile:
+  Enabled: false
+
+Style/GuardClause:
+  Enabled: false
+
+Layout/MultilineOperationIndentation:
+  EnforcedStyle: indented
+
+Layout/MultilineMethodCallIndentation:
+  EnforcedStyle: indented
+
+Style/Next:
+  Enabled: false
+
+Style/ClassVars:
+  Enabled: false
+
+Style/SignalException:
+  Enabled: false
+
+Style/StringLiterals:
+  Enabled: false
+
+Style/NumericPredicate:
+  Enabled: false

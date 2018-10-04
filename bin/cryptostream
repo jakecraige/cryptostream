@@ -1,0 +1,240 @@
+#!/usr/bin/env ruby
+$LOAD_PATH.unshift(File.join(File.expand_path('..', __dir__), 'lib'))
+
+require 'thor'
+require 'cryptostream'
+
+def default_rpc_uri(ticker)
+  case ticker
+  when :eth
+    "https://mainnet.infura.io/"
+  when :xlm
+    "https://horizon.stellar.org"
+  when :xrp
+    "https://data.ripple.com/v2/"
+  end
+end
+
+def get_rpc_uri(opts)
+  rpc_env_var_name = "#{opts[:ticker].upcase}_RPC_URI"
+  opts[:rpc_uri] || ENV[rpc_env_var_name] || default_rpc_uri(opts[:ticker])
+end
+
+def base_configuration(options)
+  configuration = {
+    ticker: options[:ticker],
+    rpc_uri: options[:rpc_uri],
+    block_retention: options[:block_retention],
+    starting_block_height: options[:starting_block_height]&.to_i
+  }
+
+  store = nil
+  # Default to starting at the main chain tip height
+  if configuration[:starting_block_height].nil?
+    # This is a hack to get the generic store class and reinitialize it using custom options. Since
+    # this is for local testing I don't mind it too much. Any real implementation would not be
+    # expected to reach into the Cryptostream::Currency namespace for anything.
+    currency_config = Cryptostream::Currency.get(configuration)
+    store = currency_config.store.class.new(
+      starting_block_height: currency_config.adapter.latest_block.number,
+      rpc: currency_config.rpc
+    )
+  end
+
+  [configuration, store]
+end
+
+class StreamCLI < Thor
+  desc "log_blocks TICKER", "Stream and log blocks for TICKER"
+  option :rpc_uri, desc: "URI of RPC node to communicate with. Required for BTC."
+  option :starting_block_height, type: :numeric, desc: "block to start syncing from. Defaults to chain tip."
+  option :block_retention, type: :numeric, desc: "number of blocks to retain in the store"
+  def log_blocks(ticker)
+    opts = options.dup # not mutable by default
+    opts[:ticker] = ticker.downcase.to_sym
+    opts[:rpc_uri] = get_rpc_uri(opts)
+
+    if opts[:rpc_uri].nil?
+      puts "Must provide --rpc_uri for: #{opts[:ticker]}"
+      exit(1)
+    end
+
+    configuration, _store = base_configuration(opts)
+    currency_config = Cryptostream::Currency.get(configuration)
+    # Hack in this feature since the logging handler needs the store
+    store = currency_config.store.class.new(
+      starting_block_height: configuration[:starting_block_height],
+      rpc: currency_config.rpc
+    )
+
+    stream = Cryptostream::Stream::Blocks.new(
+      configuration: configuration,
+      store: store,
+      plugins: [
+        Cryptostream::Plugin::StoreBlocks,
+        Cryptostream::Plugin::LogBlocks
+      ]
+    )
+    stream.run
+  end
+
+  desc "log_token_transfers", "Stream and log ERC20 and ERC721 transfers for Ethereum"
+  long_desc <<-LONGDESC
+  `log_token_transfers` will log transfer events for ERC20 and ERC721 tokens on Ethereum.
+
+    The defaults are as such:
+
+    ERC20: ZRX, BAT, WETH, REP, OMG, MKR
+
+    ERC721: CryptoKitties, LucidSight MLB, Gods Unchained and Coinbase Wallet Crypto Swag
+  LONGDESC
+  option :rpc_uri, desc: "URI of RPC node to communicate with. Defaults to Infura mainnet"
+  option :starting_block_height, type: :numeric, desc: "block to start syncing from, Defaults to chain tip."
+  option :block_retention, type: :numeric, desc: "number of blocks to retain in the store"
+  def log_token_transfers
+    opts = options.dup # not mutable by default
+    opts[:ticker] = :eth
+    opts[:rpc_uri] = get_rpc_uri(opts)
+    configuration, store = base_configuration(opts)
+
+    streamer = Cryptostream::Stream::Blocks.new(
+      configuration: configuration,
+      store: store,
+      plugins: [
+        Cryptostream::Currency::Ethereum::ERC20Plugin.new(
+          "ZRX" => "0xe41d2489571d322189246dafa5ebde1f4699f498",
+          "BAT" => "0x0d8775f648430679a709e98d2b0cb6250d2887ef",
+          "WETH" => "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "REP" => "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "OMG" => "0xd26114cd6EE289AccF82350c8d8487fedB8A0C07",
+          "MKR" => "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2"
+        ),
+
+        Cryptostream::Currency::Ethereum::ERC721Plugin.new(
+          "CryptoKitties" => "0x06012c8cf97bead5deae237070f9587f8e7a266d",
+          "LucidSight MLB" => "0x8c9b261faef3b3c2e64ab5e58e04615f8c788099",
+          "Gods Unchained" => "0x6EbeAf8e8E946F0716E6533A6f2cefc83f60e8Ab"
+        ),
+
+        Cryptostream::Plugin::StoreBlocks,
+        Cryptostream::Plugin::Lambda.new(
+          on_block_added: lambda do |block, data|
+            puts "Added block: #{block.number} (#{block.hsh})"
+
+            data[:erc20].each do |t|
+              # Assume 18 decimals which isn't true of every token contract.
+              value = t.value / 1e18
+              puts "  #{t.currency} Transfer | Amount: #{value}, Hsh: #{t.transaction_hash}"
+            end
+
+            data[:erc721].each do |t|
+              type = "Transfer"
+              type = "Created" if t.created?
+              type = "Destroyed" if t.destroyed?
+              puts "  #{t.currency} #{type} | Token ID: #{t.token_id}, Hsh: #{t.transaction_hash}"
+            end
+          end,
+
+          on_block_removed: lambda do |block, reason|
+            puts "Removed block (#{reason}): #{block.number} (#{block.hsh})"
+            # Implementer must query their own store to also remove transfers since there's no way
+            # for us to get them once a block was removed (via reorg-ing since query is based on
+            # number).
+          end
+        )
+      ]
+    )
+    streamer.run
+  end
+
+  desc "log_stellar_payments", "Stream and log payments on Stellar"
+  option :rpc_uri, desc: "URI of RPC node to communicate with. Defaults to SDF server"
+  option :starting_block_height, type: :numeric, desc: "block to start syncing from, Defaults to chain tip."
+  option :block_retention, type: :numeric, desc: "number of blocks to retain in the store"
+  def log_stellar_payments
+    opts = options.dup # not mutable by default
+    opts[:ticker] = :xlm
+    opts[:rpc_uri] = get_rpc_uri(opts)
+    configuration, store = base_configuration(opts)
+
+    streamer = Cryptostream::Stream::Blocks.new(
+      configuration: configuration,
+      store: store,
+      plugins: [
+        Cryptostream::Currency::Stellar::PaymentsPlugin,
+
+        Cryptostream::Plugin::StoreBlocks,
+        Cryptostream::Plugin::Lambda.new(
+          on_block_added: lambda do |block, data|
+            payments = data[:payments]
+            puts "Added block: #{block['sequence']} (#{block['hash']})"
+
+            payments = payments.sort_by { |p| [p.type, p.asset_code || 'XLM'] }
+            payments.each do |t|
+              case t.type
+              when "payment"
+                code = t.asset_code || 'XLM'
+                puts "  Payment | #{code} | Amount: #{t.amount} | Asset Type: #{t.asset_type}"
+              when "create_account"
+                puts "  Account Created | Starting Balance: #{t.starting_balance} | #{t.account}"
+              end
+            end
+          end,
+
+          on_block_removed: lambda do |block, reason|
+            puts "Removed block (#{reason}): #{block['sequence']} (#{block['hash']})"
+          end
+        )
+      ]
+    )
+    streamer.run
+  end
+
+  desc "log_bitcoin_transactions TICKER", "Stream and log transactions for bitcoin-like chains"
+  option :rpc_uri, desc: "Required: URI of RPC node to communicate with"
+  option :starting_block_height, type: :numeric, desc: "block to start syncing from, Defaults to chain tip."
+  option :block_retention, type: :numeric, desc: "number of blocks to retain in the store"
+  def log_bitcoin_transactions(ticker)
+    opts = options.dup # not mutable by default
+    opts[:ticker] = ticker.downcase.to_sym
+    opts[:rpc_uri] = get_rpc_uri(opts)
+    configuration, store = base_configuration(opts)
+
+    streamer = Cryptostream::Stream::Blocks.new(
+      configuration: configuration,
+      store: store,
+      plugins: [
+        Cryptostream::Currency::Bitcoin::TransactionsPlugin,
+
+        Cryptostream::Plugin::Lambda.new(
+          on_block_added: lambda do |block, data|
+            transactions = data[:transactions]
+
+            puts "Added block: #{block['height']} (#{block['hash']})"
+
+            if transactions.length > 20
+              puts "  Transactions | Too many transactions(#{transactions.length}) to list | "\
+                "Printing first 5..."
+              transactions.first(5).each do |tx|
+                puts "  Transaction  | #{tx.hash} | Inputs: #{tx.in.length} | "\
+                  "Outputs: #{tx.out.length}"
+              end
+            else
+              transactions.each do |tx|
+                puts "  Transaction | #{tx.hash} | Inputs: #{tx.in.length} | "\
+                  "Outputs: #{tx.out.length}"
+              end
+            end
+          end,
+
+          on_block_removed: lambda do |block, reason|
+            puts "Removed block (#{reason}): #{block['height']} (#{block['hash']})"
+          end
+        )
+      ]
+    )
+    streamer.run
+  end
+end
+
+StreamCLI.start(ARGV)

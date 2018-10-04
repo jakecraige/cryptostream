@@ -1,0 +1,15 @@
+.env
+.env*
+.DS_Store
+*.tar.gz
+Gemfile.lock
+doc/yarddoc/
+.yardoc/
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+#VS Code
+.vscode
